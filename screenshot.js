@@ -1,5 +1,5 @@
 /**
- * LIQUID 每日看板自动截图脚本 (Puppeteer 精准版)
+ * LIQUID 每日看板自动截图脚本 (精准裁剪版)
  * 用法: node screenshot.js
  * 前提: 项目目录下存在 liquid_dashboard_data.json（从看板页面导出）
  */
@@ -33,10 +33,9 @@ const TEMP_FILE = '/tmp/.liquid_screenshot.html';
     console.error('❌ 数据格式无效：缺少 datasets 数组');
     process.exit(1);
   }
-  const totalRecords = data.datasets.reduce((s, d) => s + (d.records || []).length, 0);
   const allNames = new Set();
   data.datasets.forEach(d => (d.records || []).forEach(r => { if (r.name) allNames.add(r.name); }));
-  console.log(`📊 已加载 ${data.datasets.length} 个数据集，共 ${totalRecords} 条记录，${allNames.size} 位达人`);
+  console.log(`📊 已加载 ${allNames.size} 位达人`);
 
   // 3. 注入数据到 HTML
   let html = fs.readFileSync(DASHBOARD_FILE, 'utf8');
@@ -47,7 +46,6 @@ const TEMP_FILE = '/tmp/.liquid_screenshot.html';
   );
   fs.writeFileSync(TEMP_FILE, html);
 
-  // 4. Puppeteer 截图 (fullPage 自动裁掉空白)
   const today = new Date();
   const dateStr = today.toISOString().slice(0, 10);
   const outputFile = path.join(PROJECT_DIR, 'daily_dashboard_' + dateStr + '.png');
@@ -72,17 +70,39 @@ const TEMP_FILE = '/tmp/.liquid_screenshot.html';
 
     await page.goto('file://' + TEMP_FILE, { waitUntil: 'networkidle0', timeout: 15000 });
 
-    // 等待表格渲染完成（默认展示每日看板，优先检查 dailyTableBody）
+    // 等待表格渲染完成
     await page.waitForFunction(() => {
       const body = document.querySelector('#dailyTableBody') || document.querySelector('#tableBody');
       return body && body.children.length > 0;
     }, { timeout: 10000 });
 
-    // fullPage: true —— 只截取实际内容，自动裁剪底部空白
+    // 精准测量实际内容区域（#tabDaily 容器的底部位置 + 一点内边距）
+    const clipRect = await page.evaluate(() => {
+      const tabContent = document.getElementById('tabDaily');
+      if (tabContent) {
+        const rect = tabContent.getBoundingClientRect();
+        return {
+          x: 0,
+          y: 0,
+          width: Math.max(document.documentElement.clientWidth || 1400, 1400),
+          height: rect.bottom + window.scrollY + 16
+        };
+      }
+      // fallback: 取 body 的实际内容高度
+      return {
+        x: 0,
+        y: 0,
+        width: document.documentElement.clientWidth,
+        height: document.body.scrollHeight
+      };
+    });
+    console.log('📏 内容区域高度: ' + clipRect.height.toFixed(0) + 'px');
+
+    // 精准裁剪截图 —— 只截有内容的区域
     await page.screenshot({
       path: outputFile,
-      fullPage: true,
-      type: 'png'
+      type: 'png',
+      clip: clipRect
     });
 
     console.log('✅ 截图已保存: ' + outputFile);
@@ -92,11 +112,9 @@ const TEMP_FILE = '/tmp/.liquid_screenshot.html';
     process.exit(1);
   } finally {
     if (browser) await browser.close();
-    // 清理临时文件
     if (fs.existsSync(TEMP_FILE)) fs.unlinkSync(TEMP_FILE);
   }
 
-  // 5. 输出文件信息
   if (fs.existsSync(outputFile)) {
     const stats = fs.statSync(outputFile);
     console.log('📏 文件大小: ' + (stats.size / 1024).toFixed(1) + ' KB');
