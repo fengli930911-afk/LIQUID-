@@ -1,0 +1,6 @@
+.DS_Store
+.workbuddy/
+daily_screenshot.png
+pending_screenshot.txt
+*.temp.html
+node_modules/
