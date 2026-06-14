@@ -402,21 +402,37 @@ function loadData() {
   if (window.__INJECTED_DATA__) {
     return window.__INJECTED_DATA__;
   }
-  var raw = localStorage.getItem(STORAGE_KEY);
+  var raw = null;
+  try { raw = localStorage.getItem(STORAGE_KEY); } catch(e) {}
   if (raw) {
     try {
       var parsed = JSON.parse(raw);
-      if (parsed.datasets && parsed.datasets.length > 0) return parsed;
-    } catch(e) {}
+      // 必须至少有一个数据集包含实际记录，否则视为空数据
+      if (parsed.datasets && parsed.datasets.some(function(d) { return d.records && d.records.length > 0; })) {
+        return parsed;
+      }
+    } catch(e) { console.warn('数据解析失败，将重新初始化'); }
   }
-  var init = getDefaultDatasets();
-  init.activeIdx = 0;
-  saveAll(init);
-  return init;
+  // 空数据只存在内存中，绝不写入 localStorage（避免污染）
+  return getDefaultDatasets();
 }
 
 function saveAll(data) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  try {
+    // 清理空壳数据集（只保留有实际记录的）
+    data.datasets = data.datasets.filter(function(d) { return d.records && d.records.length > 0; });
+    if (data.datasets.length === 0) return false;
+    data.activeIdx = Math.min(data.activeIdx, data.datasets.length - 1);
+    var jsonStr = JSON.stringify(data);
+    localStorage.setItem(STORAGE_KEY, jsonStr);
+    // 验证写入成功
+    var verify = localStorage.getItem(STORAGE_KEY);
+    return verify && verify.length > 10;
+  } catch(e) {
+    console.error('数据保存失败:', e.message);
+    showToast('⚠️ 数据保存失败！请检查浏览器存储空间', 'error');
+    return false;
+  }
 }
 
 var appData = loadData();
@@ -634,7 +650,8 @@ function addDataset(label, dateRange, records) {
   var id = 'ds_' + Date.now();
   appData.datasets.push({ id: id, label: label, dateRange: dateRange, records: records, importedAt: new Date().toISOString() });
   appData.activeIdx = appData.datasets.length - 1;
-  saveAll(appData);
+  var ok = saveAll(appData);
+  return ok;
 }
 
 function showImportModal() {
@@ -767,7 +784,19 @@ function finishImport(labelPrefix, rows) {
   if (currentTab === 'monthly') renderMonthly();
   if (currentTab === 'daily') { dailySortKey = 'sales'; dailySortAsc = false; renderDailyDashboard(); }
   if (currentTab === 'roster') renderRoster();
-  showToast('成功导入 ' + rows.length + ' 条记录！', 'success');
+  // 验证数据是否持久化成功
+  try {
+    var verifyRaw = localStorage.getItem(STORAGE_KEY);
+    var saved = verifyRaw && JSON.parse(verifyRaw);
+    var savedCount = saved ? saved.datasets.reduce(function(s, d) { return s + (d.records || []).length; }, 0) : 0;
+    if (savedCount >= rows.length) {
+      showToast('✅ 已保存 ' + rows.length + ' 条记录！关闭页面后数据不会丢失', 'success');
+    } else {
+      showToast('⚠️ 导入成功 ' + rows.length + ' 条，但持久化异常（已存 ' + savedCount + ' 条）。请使用 localhost:3456 打开页面', 'error');
+    }
+  } catch(e) {
+    showToast('成功导入 ' + rows.length + ' 条记录！', 'success');
+  }
   // 自动触发 JSON 导出（用于每日自动截图）
   setTimeout(function() { exportJSON(); }, 500);
 }
