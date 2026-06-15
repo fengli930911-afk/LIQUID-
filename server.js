@@ -17,6 +17,7 @@ const { spawn } = require('child_process');
 const PORT = 3456;
 const __dir = __dirname;
 const DASHBOARD_FILE = path.join(__dir, 'live_dashboard_v2.html');
+const BUILT_HTML = path.join(__dir, 'index.html');
 const DATA_FILE = path.join(__dir, 'liquid_dashboard_data.json');
 const LOGO_FILE = path.join(__dir, 'liquid_logo.jpg');
 const SCREENSHOT_SCRIPT = path.join(__dir, 'screenshot.js');
@@ -27,8 +28,6 @@ const NODE_MODULES = '/Users/fl/.workbuddy/binaries/node/workspace/node_modules'
 
 const GITHUB_OWNER = 'fengli930911-afk';
 const GITHUB_REPO = 'LIQUID-';
-const GITHUB_FILE = 'liquid_dashboard_data.json';
-const GITHUB_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_FILE}`;
 
 function getGitHubToken() {
   // 1. 环境变量
@@ -85,9 +84,8 @@ function runScreenshot() {
   });
 }
 
-// 防并发锁：同一时间只允许一个截图 + 一个上传
+// 防并发锁：同一时间只允许一个截图
 let _screenshotBusy = false;
-let _uploadBusy = false;
 
 function runScreenshotOnce() {
   if (_screenshotBusy) return Promise.resolve({ ok: true, skipped: true });
@@ -95,86 +93,84 @@ function runScreenshotOnce() {
   return runScreenshot().finally(() => { _screenshotBusy = false; });
 }
 
-function githubUploadOnce() {
-  if (_uploadBusy) return Promise.resolve(false);
-  _uploadBusy = true;
-  return githubUpload().finally(() => { _uploadBusy = false; });
+/**
+ * 构建内嵌数据的 HTML（数据直接写入 HTML，零缓存、零延迟）
+ * 输出: index.html（用于 GitHub Pages 展示）
+ */
+function buildHTML() {
+  try {
+    const template = fs.readFileSync(DASHBOARD_FILE, 'utf8');
+    const data = fs.readFileSync(DATA_FILE, 'utf8');
+    const jsonData = JSON.parse(data);
+    
+    // 在 <script> 标签后立即注入内嵌数据
+    const injectCode = '\n<script>window.__EMBEDDED_DATA__=' + JSON.stringify(jsonData) + ';</script>\n';
+    const built = template.replace('</head>', injectCode + '</head>');
+    
+    fs.writeFileSync(BUILT_HTML, built);
+    console.log('🔨 HTML 已构建 (' + Math.round(built.length / 1024) + 'KB, ' + jsonData.datasets.length + ' 数据集)');
+    return true;
+  } catch (e) {
+    console.error('❌ HTML 构建失败: ' + e.message);
+    return false;
+  }
 }
 
 /**
- * 使用 GitHub REST API 直接上传文件
- * 内置 409 冲突重试：并发上传时自动重新获取 SHA 后重试
+ * 通过 GitHub REST API 上传任意文件
  */
-async function githubUpload() {
+async function githubUploadFile(repoPath, localPath, commitMsg) {
   const token = getGitHubToken();
-  if (!token) {
-    console.error('❌ GitHub Token 未配置！');
-    return false;
-  }
+  if (!token) return false;
 
-  const content = fs.readFileSync(DATA_FILE);
+  const apiUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${repoPath}`;
+  const content = fs.readFileSync(localPath);
   const base64 = content.toString('base64');
-  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const headers = {
+    'Authorization': 'token ' + token,
+    'Accept': 'application/vnd.github.v3+json',
+    'User-Agent': 'LiquidDashboard/1.0'
+  };
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      // 每次都重新获取最新 SHA（解决并发上传冲突）
-      const getResp = await fetch(GITHUB_API, {
-        headers: {
-          'Authorization': 'token ' + token,
-          'Accept': 'application/vnd.github.v3+json',
-          'User-Agent': 'LiquidDashboard/1.0'
-        }
-      });
-
+      const getResp = await fetch(apiUrl, { headers });
       let sha = null;
-      if (getResp.ok) {
-        const d = await getResp.json();
-        sha = d.sha;
-      } else if (getResp.status !== 404) {
-        console.error('❌ 获取文件信息失败 (' + getResp.status + ')');
-        return false;
-      }
+      if (getResp.ok) sha = (await getResp.json()).sha;
+      else if (getResp.status !== 404) { console.error('❌ 获取 ' + repoPath + ' 信息失败 (' + getResp.status + ')'); return false; }
 
-      // 上传
-      const putResp = await fetch(GITHUB_API, {
+      const putResp = await fetch(apiUrl, {
         method: 'PUT',
-        headers: {
-          'Authorization': 'token ' + token,
-          'Accept': 'application/vnd.github.v3+json',
-          'Content-Type': 'application/json',
-          'User-Agent': 'LiquidDashboard/1.0'
-        },
-        body: JSON.stringify({
-          message: 'data: auto-update ' + ts,
-          content: base64,
-          branch: 'main',
-          ...(sha ? { sha } : {})
-        })
+        headers: Object.assign({}, headers, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ message: commitMsg, content: base64, branch: 'main', ...(sha ? { sha } : {}) })
       });
 
       if (putResp.ok) {
-        const result = await putResp.json();
-        console.log('✅ 数据已推送到 GitHub (commit ' + result.commit.sha.slice(0, 7) + ')');
+        const r = await putResp.json();
+        console.log('✅ 已推送 ' + repoPath + ' (commit ' + r.commit.sha.slice(0, 7) + ')');
         return true;
       }
-
       if (putResp.status === 409) {
-        // SHA 冲突：并发上传导致，等待 500ms 后重试
-        console.log('⏳ SHA 冲突，重试 ' + attempt + '/3...');
+        console.log('⏳ ' + repoPath + ' SHA 冲突，重试 ' + attempt + '/3...');
         await new Promise(r => setTimeout(r, 500));
         continue;
       }
-
-      console.error('❌ GitHub API 上传失败 (' + putResp.status + ')');
+      console.error('❌ 上传 ' + repoPath + ' 失败 (' + putResp.status + ')');
       return false;
-    } catch (e) {
-      console.error('❌ 网络错误: ' + e.message);
-      return false;
-    }
+    } catch (e) { console.error('❌ 网络错误 (' + repoPath + '): ' + e.message); return false; }
   }
-  console.error('❌ 3 次重试均失败，跳过本次上传');
   return false;
+}
+
+async function pushAllToGitHub() {
+  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const jsonOk = await githubUploadFile('liquid_dashboard_data.json', DATA_FILE, 'data: auto-update ' + ts);
+  
+  // 构建内嵌数据的 HTML
+  const built = buildHTML();
+  const htmlOk = built ? await githubUploadFile('index.html', BUILT_HTML, 'build: ' + ts) : false;
+  
+  return jsonOk || htmlOk;
 }
 
 function writePendingScreenshot(filePath) {
@@ -212,14 +208,10 @@ const server = http.createServer(async (req, res) => {
         const result = await runScreenshotOnce();
         if (result.ok || result.skipped) {
           if (!result.skipped) writePendingScreenshot(result.path);
-          const pushed = await githubUploadOnce();
-          const msg = pushed
-            ? '数据已同步到 GitHub，其他人可立即查看'
-            : '数据已保存本地，但 GitHub 推送未配置（设置 GITHUB_TOKEN 后自动推送）';
-          jsonResp(res, 200, { ok: true, message: msg });
+          const pushed = await pushAllToGitHub();
+          jsonResp(res, 200, { ok: true, message: pushed ? '✅ 数据已同步到 GitHub' : '数据已保存' });
         } else {
-          // 截图失败仍尝试上传
-          const pushed = await githubUploadOnce();
+          const pushed = await pushAllToGitHub();
           jsonResp(res, 200, { ok: true, message: pushed ? '数据已同步（截图未生成）' : '数据已保存（截图未生成）' });
         }
       } catch (e) {
@@ -258,14 +250,18 @@ const server = http.createServer(async (req, res) => {
   res.end('404 Not Found');
 });
 
-server.listen(PORT, '127.0.0.1', () => {
+server.listen(PORT, '127.0.0.1', async () => {
   const token = getGitHubToken();
   console.log('\n🚀 LIQUID 直播看板服务器已启动');
-  console.log('   本地: http://localhost:' + PORT);
+  console.log('   上传数据: http://localhost:' + PORT);
+  console.log('   展示链接: https://fengli930911-afk.github.io/LIQUID-/');
   if (token) {
-    console.log('   GitHub 自动推送: ✅ 已配置');
+    console.log('   GitHub 同步: ✅ 已配置');
   } else {
-    console.log('   GitHub 自动推送: ⚠️  未配置（设置 GITHUB_TOKEN 后生效）');
+    console.log('   GitHub 同步: ⚠️  未配置');
   }
-  console.log('   上传数据后将自动: 保存 JSON → 生成截图 → 推送 GitHub\n');
+  console.log('   上传后自动: 保存JSON → 截图 → 内嵌数据到HTML → 推送GitHub\n');
+
+  // 启动时构建一次 HTML（如果数据文件存在）
+  if (fs.existsSync(DATA_FILE)) buildHTML();
 });
