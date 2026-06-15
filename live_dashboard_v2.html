@@ -398,22 +398,21 @@ function getDefaultDatasets() {
 }
 
 function loadData() {
-  // 支持外部注入数据（用于无头浏览器截图）
-  if (window.__INJECTED_DATA__) {
-    return window.__INJECTED_DATA__;
-  }
+  // 1. 外部注入数据（无头浏览器截图场景）
+  if (window.__INJECTED_DATA__) return window.__INJECTED_DATA__;
+  // 2. localStorage（用户自己上传的数据）
   var raw = null;
   try { raw = localStorage.getItem(STORAGE_KEY); } catch(e) {}
   if (raw) {
     try {
       var parsed = JSON.parse(raw);
-      // 必须至少有一个数据集包含实际记录，否则视为空数据
       if (parsed.datasets && parsed.datasets.some(function(d) { return d.records && d.records.length > 0; })) {
         return parsed;
       }
-    } catch(e) { console.warn('数据解析失败，将重新初始化'); }
+    } catch(e) { console.warn('数据解析失败'); }
   }
-  // 空数据只存在内存中，绝不写入 localStorage（避免污染）
+  // 3. 内嵌数据（服务器构建时注入，优先级最高于空数据）
+  if (window.__EMBEDDED_DATA__) return window.__EMBEDDED_DATA__;
   return getDefaultDatasets();
 }
 
@@ -1317,29 +1316,6 @@ function init() {
   switchTab('daily');
 }
 init();
-
-// 如果本地无数据，尝试从同源 JSON 文件加载（支持 GitHub Pages 跨用户共享数据）
-(function checkRemoteData() {
-  var datasets = appData.datasets || [];
-  var hasData = datasets.some(function(d) { return d.records && d.records.length > 0; });
-  if (hasData || window.__INJECTED_DATA__) return;
-
-  // 加时间戳绕过 GitHub Pages 缓存
-  var url = 'liquid_dashboard_data.json?_t=' + Date.now();
-  fetch(url, { cache: 'no-store' }).then(function(resp) {
-    if (!resp.ok) return;
-    return resp.json();
-  }).then(function(remote) {
-    if (!remote || !remote.datasets) return;
-    var hasRemote = remote.datasets.some(function(d) { return d.records && d.records.length > 0; });
-    if (!hasRemote) return;
-    appData = remote;
-    // 将远程数据保存到 localStorage 以便后续使用
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(remote)); } catch(e) {}
-    switchTab('daily');
-    showToast('已加载共享数据', 'success');
-  }).catch(function() { /* 静默失败，维持空数据状态 */ });
-})();
 </script>
 </body>
 </html>
