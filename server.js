@@ -78,90 +78,103 @@ function runScreenshot() {
         console.log('✅ 截图成功: ' + file);
         resolve({ ok: true, file, path: file });
       } else {
-        console.error('❌ 截图失败 (exit ' + code + ')\n' + out + '\n' + err);
+        console.error('❌ 截图失败 (exit ' + code + ')\n' + out.slice(-200) + '\n' + err.slice(-200));
         resolve({ ok: false, log: out + err });
       }
     });
   });
 }
 
+// 防并发锁：同一时间只允许一个截图 + 一个上传
+let _screenshotBusy = false;
+let _uploadBusy = false;
+
+function runScreenshotOnce() {
+  if (_screenshotBusy) return Promise.resolve({ ok: true, skipped: true });
+  _screenshotBusy = true;
+  return runScreenshot().finally(() => { _screenshotBusy = false; });
+}
+
+function githubUploadOnce() {
+  if (_uploadBusy) return Promise.resolve(false);
+  _uploadBusy = true;
+  return githubUpload().finally(() => { _uploadBusy = false; });
+}
+
 /**
  * 使用 GitHub REST API 直接上传文件
- * 这是最可靠的方式——不依赖 git 命令、凭据助手或代理设置
+ * 内置 409 冲突重试：并发上传时自动重新获取 SHA 后重试
  */
 async function githubUpload() {
   const token = getGitHubToken();
   if (!token) {
     console.error('❌ GitHub Token 未配置！');
-    console.error('   方式1: GITHUB_TOKEN=ghp_xxx node server.js');
-    console.error('   方式2: 将 token 写入 ' + TOKEN_FILE);
     return false;
   }
 
   const content = fs.readFileSync(DATA_FILE);
   const base64 = content.toString('base64');
-  const authHeaders = {
-    'Authorization': 'token ' + token,
-    'Accept': 'application/vnd.github.v3+json',
-    'User-Agent': 'LiquidDashboard/1.0'
-  };
+  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
-  try {
-    // 第一步：获取当前文件的 SHA（GitHub API 更新文件需要 sha）
-    let sha = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const getResp = await fetch(GITHUB_API, { headers: authHeaders });
+      // 每次都重新获取最新 SHA（解决并发上传冲突）
+      const getResp = await fetch(GITHUB_API, {
+        headers: {
+          'Authorization': 'token ' + token,
+          'Accept': 'application/vnd.github.v3+json',
+          'User-Agent': 'LiquidDashboard/1.0'
+        }
+      });
+
+      let sha = null;
       if (getResp.ok) {
-        const data = await getResp.json();
-        sha = data.sha;
-        console.log('📎 当前文件 SHA: ' + sha.slice(0, 7));
-      } else if (getResp.status === 404) {
-        console.log('📄 文件不存在，将创建新文件');
-      } else {
-        const errText = await getResp.text();
-        console.error('❌ 获取文件信息失败 (' + getResp.status + '): ' + errText.slice(0, 200));
+        const d = await getResp.json();
+        sha = d.sha;
+      } else if (getResp.status !== 404) {
+        console.error('❌ 获取文件信息失败 (' + getResp.status + ')');
         return false;
       }
-    } catch (e) {
-      console.error('❌ 网络错误 (获取SHA): ' + e.message);
-      return false;
-    }
 
-    // 第二步：上传文件
-    const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
-    const body = JSON.stringify({
-      message: 'data: auto-update ' + ts,
-      content: base64,
-      branch: 'main',
-      ...(sha ? { sha } : {})
-    });
+      // 上传
+      const putResp = await fetch(GITHUB_API, {
+        method: 'PUT',
+        headers: {
+          'Authorization': 'token ' + token,
+          'Accept': 'application/vnd.github.v3+json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'LiquidDashboard/1.0'
+        },
+        body: JSON.stringify({
+          message: 'data: auto-update ' + ts,
+          content: base64,
+          branch: 'main',
+          ...(sha ? { sha } : {})
+        })
+      });
 
-    const putResp = await fetch(GITHUB_API, {
-      method: 'PUT',
-      headers: Object.assign({}, authHeaders, { 'Content-Type': 'application/json' }),
-      body
-    });
-
-    if (putResp.ok) {
-      const result = await putResp.json();
-      console.log('✅ 数据已推送到 GitHub');
-      console.log('   commit: ' + result.commit.sha.slice(0, 7));
-      console.log('   url: ' + result.content.html_url);
-      return true;
-    } else {
-      const errText = await putResp.text();
-      console.error('❌ GitHub API 上传失败 (' + putResp.status + '): ' + errText.slice(0, 300));
-      if (putResp.status === 401) {
-        console.error('   → Token 无效或已过期，请更新 GITHUB_TOKEN');
-      } else if (putResp.status === 409) {
-        console.error('   → SHA 冲突，可能是并发更新导致，下次上传会自动修复');
+      if (putResp.ok) {
+        const result = await putResp.json();
+        console.log('✅ 数据已推送到 GitHub (commit ' + result.commit.sha.slice(0, 7) + ')');
+        return true;
       }
+
+      if (putResp.status === 409) {
+        // SHA 冲突：并发上传导致，等待 500ms 后重试
+        console.log('⏳ SHA 冲突，重试 ' + attempt + '/3...');
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+
+      console.error('❌ GitHub API 上传失败 (' + putResp.status + ')');
+      return false;
+    } catch (e) {
+      console.error('❌ 网络错误: ' + e.message);
       return false;
     }
-  } catch (e) {
-    console.error('❌ 网络错误 (上传): ' + e.message);
-    return false;
   }
+  console.error('❌ 3 次重试均失败，跳过本次上传');
+  return false;
 }
 
 function writePendingScreenshot(filePath) {
@@ -196,17 +209,18 @@ const server = http.createServer(async (req, res) => {
         const total = data.datasets.reduce((s, d) => s + (d.records || []).length, 0);
         console.log('📥 收到数据: ' + data.datasets.length + ' 数据集, ' + total + ' 条记录');
 
-        const result = await runScreenshot();
-        if (result.ok) {
-          writePendingScreenshot(result.path);
-          // 推送到 GitHub（用 API，不依赖 git 命令）
-          const pushed = await githubUpload();
+        const result = await runScreenshotOnce();
+        if (result.ok || result.skipped) {
+          if (!result.skipped) writePendingScreenshot(result.path);
+          const pushed = await githubUploadOnce();
           const msg = pushed
             ? '数据已同步到 GitHub，其他人可立即查看'
             : '数据已保存本地，但 GitHub 推送未配置（设置 GITHUB_TOKEN 后自动推送）';
-          jsonResp(res, 200, { ok: true, message: msg, screenshot: path.basename(result.file) });
+          jsonResp(res, 200, { ok: true, message: msg });
         } else {
-          jsonResp(res, 500, { ok: false, message: '截图失败', log: result.log });
+          // 截图失败仍尝试上传
+          const pushed = await githubUploadOnce();
+          jsonResp(res, 200, { ok: true, message: pushed ? '数据已同步（截图未生成）' : '数据已保存（截图未生成）' });
         }
       } catch (e) {
         jsonResp(res, 400, { ok: false, message: '解析失败: ' + e.message });
@@ -217,9 +231,9 @@ const server = http.createServer(async (req, res) => {
 
   // GET /api/screenshot
   if (req.method === 'GET' && url.pathname === '/api/screenshot') {
-    const result = await runScreenshot();
-    if (result.ok) {
-      writePendingScreenshot(result.path);
+    const result = await runScreenshotOnce();
+    if (result.ok || result.skipped) {
+      if (!result.skipped) writePendingScreenshot(result.path);
       return jsonResp(res, 200, { ok: true, screenshot: path.basename(result.file) });
     }
     return jsonResp(res, 500, { ok: false, message: '截图失败' });
