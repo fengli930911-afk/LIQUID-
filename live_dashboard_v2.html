@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LIQUID 达人直播数据看板</title>
-<script src="https://cdn.bootcdn.net/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" onerror="this.onerror=null;this.src='https://cdn.sheetjs.com/xlsx-0.18.5/package/dist/xlsx.full.min.js'"></script>
 <style>
 :root {
   --bg: #f0f4f8;
@@ -702,10 +702,25 @@ function closeImportModal() {
 }
 
 function parseExcelRecords(file, callback) {
+  if (typeof XLSX === 'undefined') {
+    // XLSX 库尚未加载完成，等待后重试
+    showToast('Excel解析库加载中，请稍候...', 'info');
+    var retries = 0;
+    var checkInterval = setInterval(function() {
+      retries++;
+      if (typeof XLSX !== 'undefined') {
+        clearInterval(checkInterval);
+        parseExcelRecords(file, callback);
+      } else if (retries > 30) {
+        clearInterval(checkInterval);
+        showToast('Excel解析库加载超时，请刷新页面后重试', 'error');
+      }
+    }, 500);
+    return;
+  }
   var reader = new FileReader();
   reader.onload = function(e) {
     try {
-      if (typeof XLSX === 'undefined') { showToast('Excel解析库加载中，请稍后再试', 'error'); return; }
       var wb = XLSX.read(e.target.result, { type: 'array' });
       var ws = wb.Sheets[wb.SheetNames[0]];
       var raw = XLSX.utils.sheet_to_json(ws, { header: 1 });
