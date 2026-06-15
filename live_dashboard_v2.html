@@ -1292,6 +1292,26 @@ function init() {
   switchTab('daily');
 }
 init();
+
+// 如果本地无数据，尝试从同源 JSON 文件加载（支持 GitHub Pages 跨用户共享数据）
+(function checkRemoteData() {
+  var datasets = appData.datasets || [];
+  var hasData = datasets.some(function(d) { return d.records && d.records.length > 0; });
+  if (hasData || window.__INJECTED_DATA__) return;
+
+  fetch('liquid_dashboard_data.json').then(function(resp) {
+    if (!resp.ok) return;
+    return resp.json();
+  }).then(function(remote) {
+    if (!remote || !remote.datasets) return;
+    var hasRemote = remote.datasets.some(function(d) { return d.records && d.records.length > 0; });
+    if (!hasRemote) return;
+    appData = remote;
+    // 将远程数据保存到 localStorage 以便后续使用
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(remote)); } catch(e) {}
+    switchTab('daily');
+  }).catch(function() { /* 静默失败，维持空数据状态 */ });
+})();
 </script>
 </body>
 </html>

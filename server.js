@@ -70,6 +70,33 @@ function runScreenshot() {
   });
 }
 
+function gitPush() {
+  return new Promise((resolve) => {
+    const git = spawn('git', ['add', 'liquid_dashboard_data.json'], { cwd: __dirname });
+    git.on('close', (code) => {
+      if (code !== 0) { console.error('git add 失败 (exit ' + code + ')'); return resolve(false); }
+      const ts = new Date().toISOString().replace('T',' ').slice(0,19);
+      const commit = spawn('git', ['commit', '-m', 'data: auto-update ' + ts], { cwd: __dirname });
+      commit.on('close', (cCode) => {
+        if (cCode !== 0 && cCode !== 1) { /* 1 = nothing to commit */ console.log('git commit 跳过 (exit ' + cCode + ')'); return resolve(false); }
+        const push = spawn('git', ['push', 'origin', 'main'], { cwd: __dirname });
+        let pushOut = '', pushErr = '';
+        push.stdout.on('data', d => pushOut += d.toString());
+        push.stderr.on('data', d => pushErr += d.toString());
+        push.on('close', (pCode) => {
+          if (pCode === 0) {
+            console.log('✅ 数据已推送到 GitHub');
+            resolve(true);
+          } else {
+            console.error('❌ git push 失败: ' + pushErr.slice(-200));
+            resolve(false);
+          }
+        });
+      });
+    });
+  });
+}
+
 function writePendingScreenshot(filePath) {
   // 写入待发送标记，WorkBuddy 自动化会轮询此文件并发送
   try {
@@ -107,6 +134,10 @@ const server = http.createServer(async (req, res) => {
         const result = await runScreenshot();
         if (result.ok) {
           writePendingScreenshot(result.path);
+          // 后台自动推送到 GitHub（不阻塞响应）
+          gitPush().then(pushed => {
+            if (pushed) console.log('🚀 数据已自动部署到 GitHub Pages');
+          });
           jsonResp(res, 200, { ok: true, message: '数据已保存，截图已生成', screenshot: path.basename(result.file) });
         } else {
           jsonResp(res, 500, { ok: false, message: '截图失败', log: result.log });
