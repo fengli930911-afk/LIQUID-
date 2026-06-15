@@ -11,7 +11,7 @@ const PROJECT_DIR = __dirname;
 const DATA_FILE = path.join(PROJECT_DIR, 'liquid_dashboard_data.json');
 const DASHBOARD_FILE = path.join(PROJECT_DIR, 'live_dashboard_v2.html');
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const TEMP_FILE = '/tmp/.liquid_screenshot.html';
+const TEMP_FILE = '/tmp/.liquid_screenshot_' + process.pid + '_' + Date.now() + '.html';
 
 (async () => {
   // 1. 检查数据文件
