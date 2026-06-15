@@ -72,23 +72,30 @@ function runScreenshot() {
 
 function gitPush() {
   return new Promise((resolve) => {
-    const git = spawn('git', ['add', 'liquid_dashboard_data.json'], { cwd: __dirname });
-    git.on('close', (code) => {
-      if (code !== 0) { console.error('git add 失败 (exit ' + code + ')'); return resolve(false); }
+    const env = Object.assign({}, process.env);
+    const gitAdd = spawn('git', ['add', '-A', 'liquid_dashboard_data.json'], { cwd: __dirname, env });
+    let addErr = '';
+    gitAdd.stderr.on('data', d => addErr += d.toString());
+    gitAdd.on('close', (code) => {
+      if (code !== 0) { console.error('git add 失败 (exit ' + code + '): ' + addErr); return resolve(false); }
       const ts = new Date().toISOString().replace('T',' ').slice(0,19);
-      const commit = spawn('git', ['commit', '-m', 'data: auto-update ' + ts], { cwd: __dirname });
+      const commit = spawn('git', ['commit', '-m', 'data: auto-update ' + ts], { cwd: __dirname, env });
+      let commitOut = '', commitErr = '';
+      commit.stdout.on('data', d => commitOut += d.toString());
+      commit.stderr.on('data', d => commitErr += d.toString());
       commit.on('close', (cCode) => {
-        if (cCode !== 0 && cCode !== 1) { /* 1 = nothing to commit */ console.log('git commit 跳过 (exit ' + cCode + ')'); return resolve(false); }
-        const push = spawn('git', ['push', 'origin', 'main'], { cwd: __dirname });
+        // exit 0 = committed, exit 1 = nothing to commit (both OK)
+        if (cCode !== 0 && cCode !== 1) { console.error('git commit 失败 (exit ' + cCode + '): ' + commitErr); return resolve(false); }
+        const push = spawn('git', ['push', 'origin', 'main'], { cwd: __dirname, env });
         let pushOut = '', pushErr = '';
         push.stdout.on('data', d => pushOut += d.toString());
         push.stderr.on('data', d => pushErr += d.toString());
         push.on('close', (pCode) => {
           if (pCode === 0) {
-            console.log('✅ 数据已推送到 GitHub');
+            console.log('✅ 数据已推送到 GitHub: ' + pushOut.trim());
             resolve(true);
           } else {
-            console.error('❌ git push 失败: ' + pushErr.slice(-200));
+            console.error('❌ git push 失败 (exit ' + pCode + '): ' + pushErr.slice(-300));
             resolve(false);
           }
         });

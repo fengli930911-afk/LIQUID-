@@ -1314,7 +1314,9 @@ init();
   var hasData = datasets.some(function(d) { return d.records && d.records.length > 0; });
   if (hasData || window.__INJECTED_DATA__) return;
 
-  fetch('liquid_dashboard_data.json').then(function(resp) {
+  // 加时间戳绕过 GitHub Pages 缓存
+  var url = 'liquid_dashboard_data.json?_t=' + Date.now();
+  fetch(url, { cache: 'no-store' }).then(function(resp) {
     if (!resp.ok) return;
     return resp.json();
   }).then(function(remote) {
@@ -1325,6 +1327,7 @@ init();
     // 将远程数据保存到 localStorage 以便后续使用
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(remote)); } catch(e) {}
     switchTab('daily');
+    showToast('已加载共享数据', 'success');
   }).catch(function() { /* 静默失败，维持空数据状态 */ });
 })();
 </script>
