@@ -812,8 +812,8 @@ function finishImport(labelPrefix, rows) {
   } catch(e) {
     showToast('成功导入 ' + rows.length + ' 条记录！', 'success');
   }
-  // 自动触发 JSON 导出（用于每日自动截图）
-  setTimeout(function() { exportJSON(); }, 500);
+  // 静默同步到服务器（自动覆盖项目中的 JSON，不弹下载框）
+  syncToServer();
 }
 
 var _monthlyDataCache = null;
@@ -1206,23 +1206,33 @@ function exportRosterCSV() {
   showToast('名单导出成功！', 'success');
 }
 
+// 静默同步到本地服务器（自动覆盖项目目录中的 JSON + 生成截图 + 推送到 GitHub）
+// 比 exportJSON() 更轻量，不触发浏览器下载
+function syncToServer() {
+  var jsonStr = JSON.stringify(appData, null, 2);
+  fetch('http://localhost:3456/api/data', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: jsonStr
+  }).then(function(r) { return r.json(); })
+    .then(function(rsp) {
+      if (rsp.ok) showToast('✅ 数据已同步 + 截图已生成', 'success');
+      else showToast('⚠️ 同步失败: ' + (rsp.message || '未知错误'), 'error');
+    })
+    .catch(function() { /* 服务器未运行，静默跳过 */ });
+}
+
 function exportJSON() {
   var jsonStr = JSON.stringify(appData, null, 2);
-  // 下载 JSON 文件（浏览器本地）
+  // 下载 JSON 文件到浏览器本地
   var blob = new Blob([jsonStr], {type: 'application/json'});
   var a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'liquid_dashboard_data.json';
   a.click();
   URL.revokeObjectURL(a.href);
-  // 同时发送到本地服务器（自动覆盖项目目录中的 JSON + 生成截图）
-  fetch('http://localhost:3456/api/data', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: jsonStr
-  }).then(function(r) { return r.json(); })
-    .then(function(rsp) { showToast(rsp.ok ? '✅ 数据已同步 + 截图已生成' : '⚠️ ' + rsp.message, rsp.ok ? 'success' : 'error'); })
-    .catch(function() { showToast('JSON 已导出！', 'success'); });
+  // 同时同步到服务器
+  syncToServer();
 }
 
 function exportCSV() {
